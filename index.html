@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Which Content Signals Actually Predict Decline? A Ranking Signal Audit</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, Georgia, serif;
+    max-width: 780px;
+    margin: 60px auto;
+    padding: 0 20px;
+    line-height: 1.6;
+    color: #1a1a1a;
+    background: #ffffff;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+  .subtitle { color: #555; font-size: 1.05rem; margin-bottom: 2rem; }
+  h2 {
+    margin-top: 3rem;
+    border-top: 1px solid #ddd;
+    padding-top: 2rem;
+    font-size: 1.4rem;
+  }
+  .abstract {
+    background: #f7f7f7;
+    padding: 1.5rem;
+    border-left: 4px solid #333;
+    margin: 1.5rem 0;
+  }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 1.5rem; margin: 1.5rem 0; }
+  .stat { display: inline-block; }
+  .stat .num { font-size: 2rem; font-weight: bold; display: block; line-height: 1; }
+  .stat .label { font-size: 0.85rem; color: #555; }
+  .caveat {
+    font-size: 0.9rem;
+    color: #555;
+    font-style: italic;
+    margin-top: 0.75rem;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 1.25rem 0; }
+  td, th { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  th { background: #f0f0f0; }
+  ul { padding-left: 1.3rem; }
+  li { margin-bottom: 0.5rem; }
+  code {
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+  img { border: 1px solid #ddd; border-radius: 4px; }
+  .tag {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: #eee;
+    margin-right: 6px;
+  }
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #ddd;
+    font-size: 0.9rem;
+    color: #555;
+  }
+  footer a { color: #333; }
+  a { color: #1a4d8f; }
+</style>
+</head>
+<body>
+
+<h1>Which Content Signals Actually Predict Decline?</h1>
+<p class="subtitle">A ranking signal audit on 30,000 real, anonymized search-content pages — FlyRank ML Internship Capstone</p>
+
+<div class="abstract">
+<strong>Abstract:</strong> This study asks which observable content and search signals actually
+predict content decline, testing common assumptions (staleness, position–CTR relationships) against
+30,000 real anonymized content pages. I built a transparent baseline rule (stale content that is
+still visible in search &rarr; flag for review) and compared it against a Random Forest classifier
+under a client-grouped holdout split designed to prevent data leakage across clients. The model
+substantially outperformed the baseline at the top of the ranking &mdash; Precision@20 improved from
+0.55 to 0.85 &mdash; though the improvement narrowed at Precision@50 (0.58 to 0.68), suggesting the
+model's advantage is strongest for its highest-confidence candidates. This is decision-support
+evidence for content review prioritization, not a causal claim about what makes pages decline.
+</div>
+
+<h2>Introduction / Problem Statement</h2>
+<p>
+Content teams routinely rely on intuition to decide what to review first &mdash; "older pages need
+refreshing," "better search position always means better click-through rate." This project asks
+whether those assumptions hold up against real data, and whether a learned model can prioritize
+review candidates more reliably than a hand-written rule.
+</p>
+<p>
+<strong>Decision this supports:</strong> which signals a content strategist should weight when
+deciding what to fix on underperforming pages, replacing intuition with evidence.
+</p>
+<p>
+<strong>Action:</strong> a strategist reprioritizes their content review checklist based on the
+ranked queue and reason codes this project produces.
+</p>
+<p>
+<strong>Cost of a wrong call:</strong> wasted editorial time on signals that turn out to be noise,
+or &mdash; more seriously &mdash; mistaking a correlation for a cause and making a recommendation the
+data can't actually support.
+</p>
+
+<h2>Data</h2>
+<ul>
+<li><strong>Release used:</strong> starter anonymized slice
+(<code>data/raw/content_refresh_anonymized.csv</code>) for development and final results; the
+warehouse release (<code>FlyRank/internship-warehouse</code>, build
+<code>flyrank_pseudonymized_warehouse_release_v20260703</code>) was explored separately for the full
+data contract exercise.</li>
+<li><strong>Tables:</strong> <code>fact_content_daily_performance</code> joined to
+<code>dim_content</code> on <code>content_hash_id</code> (warehouse); single flat CSV for the
+starter slice.</li>
+<li><strong>Scope:</strong> 30,000 content pages, filtered to <code>impressions_90d &gt; 0</code> and
+<code>content_age_days &gt;= 90</code>.</li>
+<li><strong>Excluded, and why:</strong> all FlyRank product decision fields (<code>health_score</code>,
+<code>priority_score</code>, <code>action_type</code>, refresh flags) &mdash; these are not present
+in the release at all. This is a deliberate boundary: the goal is to discover signal from observable
+evidence, not to reconstruct and copy the product's own existing decisions.</li>
+<li>No client names, domains, raw URLs, or private queries appear anywhere in this dataset or in this
+paper &mdash; all identifiers are pseudonymized.</li>
+</ul>
+
+<h2>Methodology</h2>
+<ul>
+<li><strong>Task type:</strong> classification, used diagnostically for a signal audit &mdash; not
+as a production prediction system. The point is to learn which signals carry real information, not
+to ship a black-box predictor.</li>
+<li><strong>Label / proxy:</strong> <code>is_declining_label = (trend_direction == "down")</code>
+&mdash; a current-window proxy calculated from the present state of a page, not a validated future
+outcome. This is stated as a limitation, not smoothed over.</li>
+<li><strong>Features:</strong> <code>content_age_days</code>, <code>days_since_last_update</code>,
+<code>impressions_90d</code>, <code>avg_position</code>, <code>ctr</code>, <code>word_count</code>,
+<code>sessions_90d</code>, <code>engagement_rate</code> &mdash; all observable at decision time, none
+derived from the label.</li>
+<li><strong>Baseline:</strong> a transparent hand-written rule &mdash; a page is flagged if it is
+both stale (updated 180+ days ago) <em>and</em> still visible (500+ impressions in the last 90 days).
+Single reason code: <code>stale_visible_page</code>.</li>
+<li><strong>Model:</strong> a Random Forest classifier, chosen because it can capture interactions
+between signals (e.g. staleness only mattering when combined with visibility) that a single fixed
+threshold cannot express.</li>
+<li><strong>Validation design:</strong> a client-grouped train/test split
+(<code>GroupShuffleSplit</code> on <code>client_id</code>), not a plain random split &mdash; this
+prevents pages from the same client appearing in both train and test, which would let the model
+memorize client-specific quirks instead of learning transferable signal.</li>
+<li><strong>Leakage checks:</strong> every feature was confirmed observable at decision time; no
+FlyRank product flags were used; a deliberate-leak experiment (adding a label-derived column,
+watching the score jump toward-perfect, then removing it) confirmed the modeling pipeline is
+leakage-aware.</li>
+</ul>
+
+<h2>Results</h2>
+<p>Model vs. baseline, evaluated on the exact same client-grouped holdout split and the exact same metric.</p>
+<table>
+<tr><th>Metric</th><th>Baseline (rule)</th><th>Model (Random Forest)</th></tr>
+<tr><td>Precision@20</td><td>0.55</td><td>0.85</td></tr>
+<tr><td>Precision@50</td><td>0.58</td><td>0.68</td></tr>
+<tr><td>ROC AUC</td><td>0.498</td><td>0.588</td></tr>
+<tr><td>Average Precision</td><td>0.510</td><td>0.586</td></tr>
+</table>
+
+<img src="work/figures/model_score_distribution.png" alt="Distribution of model decline-risk scores across the portfolio" style="width:100%">
+
+<p class="caveat">
+Client-grouped holdout split (20% of clients held out entirely); results from a 30,000-row
+anonymized starter slice. The baseline's ROC AUC (0.498, essentially at chance) looks alarming next
+to its Precision@20 (0.55, clearly above the ~0.54 base decline rate) until you consider why: a rule
+that only outputs three discrete score levels (0, 0.5, 1) can't form a smooth ranking curve, which
+limits how a full-threshold metric like ROC AUC can reward it. Precision@k is the more meaningful
+comparison for this ranked-review use case, since that's how the queue is actually consumed.
+</p>
+
+<p class="caveat">
+Notably, the model's Precision@20 (0.85) exceeds its Precision@50 (0.68) &mdash; confidence narrows
+as the review queue gets longer. The model's strongest signal is concentrated in its most-confident
+top predictions, not spread evenly across the top 50.
+</p>
+
+<h2>Limitations &amp; Honest Framing</h2>
+<ul>
+<li>The label is a current-window proxy, not a confirmed future outcome.</li>
+<li>This is observational data only &mdash; nothing here proves causation. A high score means
+"review this page first," not "refreshing it will fix it."</li>
+<li>Validated on a 30,000-row anonymized starter slice, not the full ~79-million-row warehouse.</li>
+<li>No claims are made about Google's ranking algorithm, and no claim is made that a content refresh
+causes recovery &mdash; neither is supported by this data.</li>
+<li>All claims in this paper use observed, measured, directional, and decision-support language.</li>
+</ul>
+
+<h2>Ranked Recommendations</h2>
+<p>
+The model's output is turned into an action queue using reason codes, not a bare score:
+</p>
+<ul>
+<li><code>model_decline_risk</code> (model probability &ge; 0.65) or <code>stale_visible_page</code>
+(stale + visible under the baseline rule) &rarr; <strong>review for refresh</strong></li>
+<li><code>low_ctr_visible_page</code> (visible, well-positioned, but low click-through rate)
+&rarr; <strong>review metadata / snippet</strong></li>
+<li>everything else &rarr; <strong>monitor only</strong></li>
+</ul>
+<p>
+Out of 30,000 pages, 14,893 were flagged for review under this scoring. <strong>Human review is
+required before any action is taken</strong> &mdash; this queue prioritizes attention, it does not
+authorize automatic edits, unpublishing, or any client-facing change. It should never be used to
+auto-publish changes, auto-prune pages, or make causal claims about why a page declined.
+</p>
+
+<h2>Reproducibility</h2>
+<p>
+Full notebooks, data contract, baseline, model, validation, and action playbook are available in the
+project repository:
+<a href="https://github.com/saadar2846/flyrank_ml_internship">github.com/saadar2846/flyrank_ml_internship</a>
+</p>
+
+<footer>
+<p>Built on the FlyRank ML Internship dataset &mdash; <a href="https://flyrank.ai">flyrank.ai</a></p>
+</footer>
+
+</body>
+</html>
